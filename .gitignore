@@ -1,0 +1,4 @@
+.amlignore*
+hal-paper-analysis/
+traces/
+.DS_Store
