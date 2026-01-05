@@ -54,6 +54,18 @@ def extract_text_from_content(content):
     return str(content)
 
 
+def normalize_whitespace(text):
+    """Normalize excessive whitespace while preserving structure."""
+    import re
+    # Collapse multiple spaces to single space
+    text = re.sub(r' {2,}', ' ', text)
+    # Collapse multiple newlines to max 2 (preserve paragraph breaks)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Remove spaces at line starts/ends
+    text = '\n'.join(line.strip() for line in text.split('\n'))
+    return text
+
+
 def extract_from_trace_file(trace_file: Path, needed_task_ids: set):
     """Extract system prompt and task input from a trace file for specific task IDs."""
     results = {}
@@ -114,6 +126,8 @@ def extract_from_trace_file(trace_file: Path, needed_task_ids: set):
             # Combine everything into complete input
             if all_parts:
                 combined = '\n\n---\n\n'.join(all_parts)
+                # Normalize whitespace to fix LaTeX/Wikipedia formatting issues
+                combined = normalize_whitespace(combined)
                 # Keep the longest/most complete version
                 if len(combined) > best_length:
                     best_content = combined
