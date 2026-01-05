@@ -54,6 +54,33 @@ def extract_text_from_content(content):
     return str(content)
 
 
+def extract_assistantbench_messages(messages_wrapper):
+    """Extract messages from assistantbench's special serialized format."""
+    if not messages_wrapper or not isinstance(messages_wrapper, list):
+        return []
+    
+    # Unwrap: messages is [[{msg1}, {msg2}, ...]]
+    if isinstance(messages_wrapper[0], list):
+        messages_list = messages_wrapper[0]
+    else:
+        messages_list = messages_wrapper
+    
+    result = []
+    for msg in messages_list:
+        if isinstance(msg, dict) and 'kwargs' in msg:
+            kwargs = msg.get('kwargs', {})
+            msg_type = kwargs.get('type', 'unknown')
+            content = kwargs.get('content', '')
+            
+            if isinstance(content, str) and content:
+                result.append({
+                    'role': msg_type,
+                    'content': content
+                })
+    
+    return result
+
+
 def normalize_whitespace(text):
     """Normalize excessive whitespace while preserving structure."""
     import re
@@ -67,8 +94,9 @@ def normalize_whitespace(text):
 
 
 def extract_from_trace_file(trace_file: Path, needed_task_ids: set):
-    """Extract system prompt and task input from a trace file for specific task IDs."""
+    """Extract ONLY the first input from a trace file for specific task IDs."""
     results = {}
+    is_assistantbench = 'assistantbench' in str(trace_file)
     
     try:
         with open(trace_file) as f:
@@ -87,51 +115,92 @@ def extract_from_trace_file(trace_file: Path, needed_task_ids: set):
         if task_id and str(task_id) in needed_task_ids:
             task_entries[str(task_id)].append(entry)
     
-    # Extract system prompt and task input from first LLM call for each task
+    # Extract ONLY the first input message for each task
     for task_id, entries in task_entries.items():
         best_content = None
-        best_length = 0
         
-        # Check multiple entries to find the most complete one
-        for entry in sorted(entries, key=lambda x: x.get('started_at', ''))[:10]:
+        # For assistantbench: find LLM call with system prompt (not the short warmup call)
+        # For others: find entry with "Instruction:" (taubench) or first valid entry
+        sorted_entries = sorted(entries, key=lambda x: x.get('started_at', ''))
+        
+        for entry in sorted_entries[:10]:
             inputs = entry.get('inputs', {})
             if not isinstance(inputs, dict):
                 continue
             
             messages = inputs.get('messages', [])
-            if not isinstance(messages, list) or not messages:
+            if not messages:
                 continue
             
-            # Collect ALL content from system and user messages
-            all_parts = []
-            
-            # Get all system/developer messages
-            for msg in messages:
-                if not isinstance(msg, dict):
+            # Handle assistantbench's special format
+            if is_assistantbench:
+                parsed_messages = extract_assistantbench_messages(messages)
+                if not parsed_messages:
                     continue
-                if msg.get('role') in ['system', 'developer']:
-                    content = extract_text_from_content(msg.get('content', ''))
-                    if content:
-                        all_parts.append(content)
-            
-            # Get all user messages (except greetings)
-            for msg in messages:
-                if not isinstance(msg, dict):
+                
+                # Look for LLM call with system message (length > 1000)
+                has_substantial_system = any(
+                    msg['role'] in ['system'] and len(msg['content']) > 1000
+                    for msg in parsed_messages
+                )
+                
+                if not has_substantial_system:
                     continue
-                if msg.get('role') == 'user':
-                    content = extract_text_from_content(msg.get('content', ''))
-                    if content and content not in ['Hi! How can I help you today?', 'Hello', 'Hi']:
-                        all_parts.append(content)
+                
+                # Extract system + first 2 human messages
+                all_parts = []
+                for msg in parsed_messages:
+                    if msg['role'] == 'system':
+                        all_parts.append(msg['content'])
+                    elif msg['role'] == 'human':
+                        all_parts.append(msg['content'])
+                        if len(all_parts) >= 3:  # system + 2 human messages
+                            break
+                
+                if all_parts:
+                    best_content = '\n\n---\n\n'.join(all_parts)
+                    break
             
-            # Combine everything into complete input
-            if all_parts:
-                combined = '\n\n---\n\n'.join(all_parts)
-                # Normalize whitespace to fix LaTeX/Wikipedia formatting issues
-                combined = normalize_whitespace(combined)
-                # Keep the longest/most complete version
-                if len(combined) > best_length:
-                    best_content = combined
-                    best_length = len(combined)
+            # Handle other benchmarks
+            else:
+                if not isinstance(messages, list):
+                    continue
+                
+                # Extract ONLY the initial task description
+                all_parts = []
+                seen_user = False
+                
+                for msg in messages:
+                    if not isinstance(msg, dict):
+                        continue
+                    
+                    role = msg.get('role')
+                    
+                    # Take first system/developer message
+                    if role in ['system', 'developer'] and not all_parts:
+                        content = extract_text_from_content(msg.get('content', ''))
+                        if content:
+                            all_parts.append(content)
+                    
+                    # Take ONLY the first user message (the actual task)
+                    elif role == 'user' and not seen_user:
+                        content = extract_text_from_content(msg.get('content', ''))
+                        # Skip generic greetings
+                        if content and content not in ['Hi! How can I help you today?', 'Hello', 'Hi']:
+                            all_parts.append(content)
+                            seen_user = True
+                            break  # Stop after first user message
+                
+                if all_parts:
+                    combined = '\n\n---\n\n'.join(all_parts)
+                    # Normalize whitespace to fix LaTeX/Wikipedia formatting issues
+                    combined = normalize_whitespace(combined)
+                    
+                    # For taubench: only keep if it has "Instruction:" (task-specific)
+                    # For others: take first valid entry
+                    if 'Instruction:' in combined or 'taubench' not in str(trace_file):
+                        best_content = combined
+                        break  # Found the right entry
         
         if best_content:
             results[task_id] = best_content
