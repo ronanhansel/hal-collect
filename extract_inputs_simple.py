@@ -55,7 +55,7 @@ def extract_text_from_content(content):
 
 
 def extract_from_trace_file(trace_file: Path, needed_task_ids: set):
-    """Extract task inputs from a trace file for specific task IDs."""
+    """Extract system prompt and task input from a trace file for specific task IDs."""
     results = {}
     
     try:
@@ -75,9 +75,13 @@ def extract_from_trace_file(trace_file: Path, needed_task_ids: set):
         if task_id and str(task_id) in needed_task_ids:
             task_entries[str(task_id)].append(entry)
     
-    # Extract input from first LLM call for each task
+    # Extract system prompt and task input from first LLM call for each task
     for task_id, entries in task_entries.items():
-        for entry in sorted(entries, key=lambda x: x.get('started_at', ''))[:3]:
+        best_content = None
+        best_length = 0
+        
+        # Check multiple entries to find the most complete one
+        for entry in sorted(entries, key=lambda x: x.get('started_at', ''))[:10]:
             inputs = entry.get('inputs', {})
             if not isinstance(inputs, dict):
                 continue
@@ -86,31 +90,37 @@ def extract_from_trace_file(trace_file: Path, needed_task_ids: set):
             if not isinstance(messages, list) or not messages:
                 continue
             
-            # Try to extract user message
+            # Collect ALL content from system and user messages
+            all_parts = []
+            
+            # Get all system/developer messages
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get('role') in ['system', 'developer']:
+                    content = extract_text_from_content(msg.get('content', ''))
+                    if content:
+                        all_parts.append(content)
+            
+            # Get all user messages (except greetings)
             for msg in messages:
                 if not isinstance(msg, dict):
                     continue
                 if msg.get('role') == 'user':
                     content = extract_text_from_content(msg.get('content', ''))
                     if content and content not in ['Hi! How can I help you today?', 'Hello', 'Hi']:
-                        results[task_id] = content
-                        break
+                        all_parts.append(content)
             
-            if task_id in results:
-                break
-            
-            # Fall back to system message
-            for msg in messages:
-                if not isinstance(msg, dict):
-                    continue
-                if msg.get('role') == 'system':
-                    content = extract_text_from_content(msg.get('content', ''))
-                    if content:
-                        results[task_id] = content
-                        break
-            
-            if task_id in results:
-                break
+            # Combine everything into complete input
+            if all_parts:
+                combined = '\n\n---\n\n'.join(all_parts)
+                # Keep the longest/most complete version
+                if len(combined) > best_length:
+                    best_content = combined
+                    best_length = len(combined)
+        
+        if best_content:
+            results[task_id] = best_content
     
     return results
 
@@ -189,12 +199,14 @@ def main():
     if all_results:
         output_df = pd.DataFrame(all_results)
         output_path = base_dir / args.output
-        output_df.to_csv(output_path, index=False)
+        # Save as pickle to avoid CSV formatting issues with multi-line content
+        output_path_pkl = output_path.with_suffix('.pkl')
+        output_df.to_pickle(output_path_pkl)
         
         print(f"\n{'='*60}")
         print(f"SUMMARY")
         print(f"{'='*60}")
-        print(f"Saved {len(output_df)} entries to {output_path}")
+        print(f"Saved {len(output_df)} entries to {output_path_pkl}")
         
         # Show coverage
         for benchmark in sorted(output_df['benchmark_id'].unique()):
