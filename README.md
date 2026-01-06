@@ -81,3 +81,9 @@ python hal-paper-analysis/qualitative/full_pipeline.py
 ```
 
 3. Go to docent and run your rubric.
+
+```bash
+CONDA_PLUGINS_AUTO_ACCEPT_TOS=yes conda create -n hal python=3.10 -y
+conda activate hal
+pip install -r requirements.txt
+```

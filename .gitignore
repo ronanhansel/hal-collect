@@ -2,3 +2,6 @@
 hal-paper-analysis/
 traces/
 .DS_Store
+resmat/
+.ipynb_aml_checkpoints/
+output/
