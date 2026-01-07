@@ -31,7 +31,7 @@ df_subset = df[cols_to_keep]
 merged_df = df_subset.groupby('test_taker_id').max().reset_index()
 
 # Save
-output_file = 'result/result_matrix_normalized.csv'
+output_file = 'result/result_matrix_merged.csv'
 merged_df.to_csv(output_file, index=False)
 
 print(f"Processing complete. Data saved to {output_file}")
