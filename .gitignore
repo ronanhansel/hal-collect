@@ -5,3 +5,6 @@ traces/
 resmat/
 .ipynb_aml_checkpoints/
 output/
+__pycache__/
+result/
+rubrics/

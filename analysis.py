@@ -1,199 +1,210 @@
 import pandas as pd
-df = pd.read_pickle('resmat/response_matrix_merged.pkl')
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-import numpy as np
 from scipy.cluster import hierarchy
-from scipy.spatial.distance import pdist, squareform
+from scipy.spatial.distance import pdist
 
-def visualize_response_matrix(df, filename='response_matrix_visualization.png'):
+# 1. Load the Normalized Data
+# Ensure this file exists from the previous step
+input_file = 'result/result_matrix_normalized.csv'
+df = pd.read_csv(input_file)
+df = df.set_index('test_taker_id')
+
+def visualize_response_matrix_clustered(df, filename='output/response_matrix_visualization.pdf'):
     """
-    Visualize response matrix with:
-    - Red: incorrect (0)
-    - Blue: correct (1)  
-    - White: NaN
-    - Grouped by benchmark with vertical lines
+    Visualizes the response matrix with:
+    - Columns: Grouped by benchmark (sorted by difficulty within benchmark).
+    - Rows: Clustered by similarity (Hierarchical Clustering) to group similar agents.
+    - Output: High-res PDF.
     """
-    # Create a copy of the dataframe and group benchmarks by prefix
     df_viz = df.copy()
+
+    # --- PART 1: Column Processing (Benchmarks) ---
+    # Create cleaner column MultiIndex (Benchmark, TaskID)
+    new_columns = []
+    for col in df_viz.columns:
+        # Heuristic to split "benchmark.taskid" or "benchmark_taskid"
+        if '.' in col:
+            parts = col.split('.', 1)
+            bench, task = parts[0], parts[1]
+        else:
+            # Fallback for simple names
+            bench = col.split('_')[0] if '_' in col else col
+            task = col
+        new_columns.append((bench, task))
     
-    # Extract benchmark prefixes (before first underscore)
-    benchmark_names = df_viz.columns.get_level_values("benchmark")
-    benchmark_prefixes = [b.split('_')[0] if '_' in b else b for b in benchmark_names]
+    df_viz.columns = pd.MultiIndex.from_tuples(new_columns, names=['benchmark', 'task_id'])
+
+    # Define Benchmark Order & Mapping
+    benchmark_order = ['assistantbench', 'taubench', 'corebench',  'swebench', 'gaia', 'scienceagentbench', 'scicode',
+                       'usaco', 'colbench']
     
-    # Define the desired order for benchmarks
-    benchmark_order = ['assistantbench', 'corebench', 'gaia', 'scicode', 'swebench', 
-                       'taubench', 'usaco', 'colbench', 'online']
-    
-    # Map benchmark names to more legible versions
     benchmark_name_map = {
-        'assistantbench': 'AssistantBench',
-        'corebench': 'CORE',
-        'gaia': 'GAIA',
-        'scicode': 'Scicode',
-        'swebench': 'SWE',
-        'taubench': 'TAU',
-        'usaco': 'USACO',
-        'colbench': 'COL',
-        'online': 'Mind2Web'
+        'assistantbench': 'AssistantBench', 'corebench': 'CORE', 'gaia': 'GAIA',
+        'scicode': 'Scicode', 'swebench': 'SWE', 'taubench': 'TAU',
+        'usaco': 'USACO', 'colbench': 'COL', 'online': 'Mind2Web',
+        'scienceagentbench': 'ScienceAgentBench'
     }
+
+    # Assign Sort Keys for Columns
+    benchmark_order_map = {b: i for i, b in enumerate(benchmark_order)}
     
-    # Create sort keys for each column based on the desired order
-    benchmark_order_map = {bench: idx for idx, bench in enumerate(benchmark_order)}
-    sort_keys = [benchmark_order_map.get(prefix, 999) for prefix in benchmark_prefixes]
+    # Helper to get sort key for a benchmark prefix
+    def get_bench_sort_key(bench_name):
+        # Remove potential suffixes like "_text"
+        base = bench_name.split('_')[0]
+        return benchmark_order_map.get(base, 999)
+
+    # Sort Columns: Primary=Benchmark Order, Secondary=Difficulty (Success Rate)
+    # We calculate success rate per task first
+    task_success_rate = df_viz.mean()
     
-    # Create new MultiIndex with sort keys and mapped names
-    task_ids = df_viz.columns.get_level_values("task_id")
-    benchmark_prefixes_mapped = [benchmark_name_map.get(b, b) for b in benchmark_prefixes]
-    
-    new_columns = pd.MultiIndex.from_tuples(
-        list(zip(task_ids, sort_keys, benchmark_prefixes_mapped)), 
-        names=['task_id', 'sort_key', 'benchmark']
-    )
-    df_viz.columns = new_columns
-    
-    # Sort by the sort_key to get the desired order
-    df_viz = df_viz.sort_index(axis=1, level=['sort_key', 'task_id'])
-    
-    # Drop the sort_key level, keeping only task_id and benchmark (display name)
-    df_viz.columns = df_viz.columns.droplevel('sort_key')
-    
-    # Balanced seriation: Sort to reduce sparsity while maintaining structure
-    
-    # For columns: Sort within each benchmark by difficulty (success rate)
-    # This creates red (hard) to blue (easy) gradient
-    benchmark_values = df_viz.columns.get_level_values("benchmark")
-    col_order = []
-    
-    for bench in pd.unique(benchmark_values):
-        bench_mask = benchmark_values == bench
-        bench_cols = df_viz.loc[:, bench_mask]
-        
-        # Calculate success rate for each task (ignoring NaN)
-        success_rates = bench_cols.sum() / bench_cols.notna().sum()
-        # Sort by success rate ascending (hardest tasks first)
-        sorted_cols = success_rates.sort_values().index
-        col_order.extend(sorted_cols)
-    
-    df_viz = df_viz[col_order]
-    
-    # For rows: Hybrid approach for balanced density
-    # Primary sort: number of tasks attempted (coverage) - descending to put dense rows on top
-    # Secondary sort: success rate among attempted tasks - ascending for weak to strong
-    tasks_attempted = df_viz.notna().sum(axis=1)
-    success_rate = df_viz.sum(axis=1) / df_viz.notna().sum(axis=1)
-    
-    # Create sorting dataframe
-    sort_df = pd.DataFrame({
-        'coverage': -tasks_attempted,  # Negative for descending (dense first)
-        'success_rate': success_rate
+    # Create a temporary sorting DataFrame for columns
+    col_meta = pd.DataFrame({
+        'bench': df_viz.columns.get_level_values('benchmark'),
+        'task': df_viz.columns.get_level_values('task_id'),
+        'success': task_success_rate.values
     })
+    col_meta['bench_sort_key'] = col_meta['bench'].apply(get_bench_sort_key)
+    col_meta['bench_display'] = col_meta['bench'].map(lambda x: benchmark_name_map.get(x, benchmark_name_map.get(x.split('_')[0], x)))
     
-    # Sort: dense rows (high coverage) first, then by success rate (weak to strong)
-    df_viz = df_viz.loc[sort_df.sort_values(['coverage', 'success_rate']).index]
+    # Sort columns by Benchmark Order -> Success Rate (Hard to Easy or Easy to Hard)
+    # Ascending success rate = Hardest tasks first (usually looks better)
+    sorted_cols_idx = col_meta.sort_values(['bench_sort_key', 'success']).index
     
-    # Extract the benchmark labels from MultiIndex columns
-    benchmark_values = df_viz.columns.get_level_values("benchmark")
+    # Reorder DataFrame Columns
+    df_viz = df_viz.iloc[:, sorted_cols_idx]
     
-    # Identify the boundaries where the benchmark changes
-    boundaries = []
-    for i in range(1, len(benchmark_values)):
-        if benchmark_values[i] != benchmark_values[i - 1]:
-            boundaries.append(i - 0.5)  # Place line between columns
+    # Update Column Index to use Display Names for visualization logic
+    new_level = col_meta.iloc[sorted_cols_idx]['bench_display'].values
+    df_viz.columns = pd.MultiIndex.from_arrays([new_level, df_viz.columns.get_level_values('task_id')], names=['benchmark', 'task_id'])
+
+    # --- PART 2: Row Processing (Clustering) ---
+    print("Performing hierarchical clustering on agents...")
     
-    # Create colormap: white is NaN, red is 0, blue is 1
-    # We'll use -1 for NaN in visualization
-    value = df_viz.copy()
-    value = value.fillna(-1)  # Replace NaN with -1 for visualization
+    # Prepare data for clustering: 
+    # Replace NaN with a distinct value (e.g., 0.5 or -1) so "not attempted" is a feature.
+    # Metric: 'euclidean' or 'cityblock' usually works well for 0/1 data.
+    cluster_data = df_viz.fillna(0.5) 
     
-    cmap = mcolors.ListedColormap(["white", "red", "blue"])
+    # Calculate Linkage Matrix (Ward's method usually gives distinct, tight clusters)
+    # Check if we have enough rows
+    if len(df_viz) > 1:
+        # [MODIFIED] Added optimal_ordering=True
+        # This reorganizes the leaves to maximize similarity between adjacent rows
+        Z = hierarchy.linkage(cluster_data, method='ward', metric='euclidean', optimal_ordering=True)
+        
+        # Get the sorted order of leaves
+        leaves_order = hierarchy.leaves_list(Z)
+        
+        # [Optional] Keep your reverse if you prefer top-down ordering
+        leaves_order = leaves_order[::-1]
+        
+        # Reorder Rows
+        df_viz = df_viz.iloc[leaves_order]
+    else:
+        print("Not enough rows to cluster.")
+
+    # --- PART 3: Visualization ---
+    
+    # Prepare Plot Data (NaN -> -1 for coloring)
+    plot_data = df_viz.fillna(-1).values
+    
+    # Define Colors: -1: White, 0: Red, 1: Blue
+    cmap = mcolors.ListedColormap(['white', '#FF4444', '#4444FF']) # Slightly softer Red/Blue
     bounds = [-1.5, -0.5, 0.5, 1.5]
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
-    
-    # Calculate midpoints for each benchmark group label
-    benchmarks_list = list(benchmark_values)
-    benchmark_names_list = []
-    benchmark_midpoints = []
-    current_benchmark = benchmarks_list[0]
-    start_index = 0
-    
-    for i, bench in enumerate(benchmarks_list):
-        if bench != current_benchmark:
-            midpoint = (start_index + i - 1) / 2.0
-            benchmark_names_list.append(current_benchmark)
-            benchmark_midpoints.append(midpoint)
-            current_benchmark = bench
-            start_index = i
-    
-    # Add the last benchmark group
-    midpoint = (start_index + len(benchmarks_list) - 1) / 2.0
-    benchmark_names_list.append(current_benchmark)
-    benchmark_midpoints.append(midpoint)
-    
-    # Plot the matrix with increased height for better readability
+
+    # Setup Figure
+    # Height adjusted dynamically based on number of rows to ensure labels fit
+    n_rows, n_cols = plot_data.shape 
     fig, ax = plt.subplots(figsize=(28, 14))
     
-    # Use pcolormesh instead of matshow for vector output (sharp when zoomed)
-    num_rows, num_cols = value.shape
-    cax = ax.pcolormesh(range(num_cols + 1), range(num_rows + 1), value.values, 
+    # Plot Heatmap
+    cax = ax.pcolormesh(range(n_cols + 1), range(n_rows + 1), plot_data, 
                         cmap=cmap, norm=norm, edgecolors='none', linewidth=0)
     
-    # Invert y-axis to match matshow behavior (0 at top)
-    ax.invert_yaxis()
+    ax.invert_yaxis() # Top-down
     ax.set_aspect('auto')
+    ax.set_xticks([]) # Hide x ticks
+
+    # Add Vertical Dividers for Benchmarks
+    benchmarks = df_viz.columns.get_level_values('benchmark')
+    unique_benchs = []
+    boundaries = []
     
-    # Add vertical dotted lines at each boundary
+    # Iterate to find boundaries and label positions
+    curr_b = benchmarks[0]
+    start_idx = 0
+    unique_benchs.append(curr_b)
+    
+    for i, b in enumerate(benchmarks):
+        if b != curr_b:
+            boundaries.append(i)
+            # Add label for previous block
+            mid = (start_idx + i) / 2
+            ax.text(mid, -1.0, curr_b, ha='center', va='bottom', 
+                    rotation=90, fontsize=12, fontweight='bold')
+            
+            curr_b = b
+            start_idx = i
+            unique_benchs.append(b)
+            
+    # Add last label
+    mid = (start_idx + len(benchmarks)) / 2
+    ax.text(mid, -1.0, curr_b, ha='center', va='bottom', 
+            rotation=90, fontsize=12, fontweight='bold')
+
+    # Draw Lines
     for b in boundaries:
-        ax.axvline(x=b, color="black", linewidth=0.8, linestyle="--", alpha=0.8)
+        ax.axvline(x=b, color='black', linewidth=0.5, linestyle='--')
+
+    # --- Row Labels (Model Names) ---
+    ax.set_yticks(np.arange(n_rows) + 0.5)
+    # DECREASED FONT SIZE HERE
+    ax.set_yticklabels(df_viz.index, fontsize=2, va='center') 
     
-    # Add benchmark labels above the matrix at midpoints
-    for name, pos in zip(benchmark_names_list, benchmark_midpoints):
-        ax.text(pos + 0.5, -1.5, name, ha='center', va='bottom', rotation=90, fontsize=10, fontweight='bold')
-    
-    # Add full agent labels on the y-axis (shift by 0.5 for pcolormesh centering)
-    agent_labels = df_viz.index.tolist()
-    ax.set_yticks([i + 0.5 for i in range(len(df_viz.index))])
-    ax.set_yticklabels(agent_labels, fontsize=2)
-    
-    # Remove x-axis tick labels (we only show benchmark names)
-    ax.set_xticks([])
-    
-    # Add a colorbar
-    cbar = plt.colorbar(cax, ax=ax, fraction=0.015, pad=0.02)
+    # Colorbar
+    cbar = plt.colorbar(cax, ax=ax, fraction=0.01, pad=0.01)
     cbar.set_ticks([-1, 0, 1])
-    cbar.set_ticklabels(["Not Attempted", "Incorrect", "Correct"])
-    cbar.ax.tick_params(labelsize=10)
-    
+    cbar.set_ticklabels(['Not Attempted', 'Incorrect', 'Correct'])
+
     plt.tight_layout()
-    plt.savefig(filename, bbox_inches="tight")
-    print(f"Saved visualization to {filename}")
-    print(f"Total benchmarks: {len(benchmark_names_list)}")
-    print(f"Benchmark groups: {benchmark_names_list}")
-    plt.show()
+    
+    # Ensure output directory exists
+    import os
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    
+    plt.savefig(filename, format='pdf', bbox_inches='tight')
+    print(f"Saved clustered visualization to {filename}")
 
-# Visualize the merged response matrix
-visualize_response_matrix(df, 'output/response_matrix_visualization.pdf')
-# Diagnostic: Check the structure of the dataframe
-print("DataFrame shape:", df.shape)
-print("\nFirst few rows:")
-print(df.index[:5])
-print("\nFirst few columns:")
-print(df.columns[:10])
-print("\nUnique benchmarks:")
-print(df.columns.get_level_values("benchmark").unique())
-print("\nBenchmark value counts:")
-print(df.columns.get_level_values("benchmark").value_counts())
-# Check benchmark grouping by prefix
-benchmark_names = df.columns.get_level_values("benchmark")
-print("Sample benchmark names:", benchmark_names[:20].tolist())
+# Visualize the result matrix
+print("\n" + "="*60)
+print("VISUALIZING RESULT MATRIX")
+print("="*60)
+visualize_response_matrix_clustered(df, filename='result/response_matrix_visualization.pdf')
 
-# Extract benchmark prefixes (before first underscore)
-benchmark_prefixes = [b.split('_')[0] if '_' in b else b for b in benchmark_names]
-print("\nUnique benchmark prefixes:")
-print(set(benchmark_prefixes))
+# Visualize all rubric matrices
+print("\n" + "="*60)
+print("VISUALIZING RUBRIC MATRICES")
+print("="*60)
 
-# Check how many of each prefix
-from collections import Counter
-print("\nPrefix counts:")
-for prefix, count in Counter(benchmark_prefixes).items():
-    print(f"  {prefix}: {count}")
+rubric_types = ['environmentalbarrier', 'instructionfollowing', 'selfcorrection', 'tooluse', 'verification']
+
+for rubric_type in rubric_types:
+    print(f"\nProcessing {rubric_type}...")
+    try:
+        rubric_file = f'rubrics/rubrics_matrix_{rubric_type}.csv'
+        rubric_df = pd.read_csv(rubric_file)
+        rubric_df = rubric_df.set_index('test_taker_id')
+        
+        output_file = f'result/rubrics_{rubric_type}_visualization.pdf'
+        visualize_response_matrix_clustered(rubric_df, filename=output_file)
+        
+    except Exception as e:
+        print(f"  Error processing {rubric_type}: {e}")
+
+print("\n" + "="*60)
+print("✓ ALL VISUALIZATIONS COMPLETED")
+print("="*60)

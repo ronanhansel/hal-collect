@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Set
 import pandas as pd
 from collections import defaultdict
-import re
+import sys
+
+# Add tools directory to path to import clean_name
+sys.path.insert(0, str(Path(__file__).parent / 'tools'))
+from clean_name import normalize_model_name, get_clean_scaffold_and_model
 
 # Optional: ijson for streaming large files (not currently used)
 try:
@@ -22,141 +26,6 @@ try:
     HAS_IJSON = True
 except ImportError:
     HAS_IJSON = False
-
-def normalize_model_name(model_name: str) -> str:
-    """
-    Normalizes model name to snake_case with YYYY_MM_DD date format.
-    """
-    if not isinstance(model_name, str):
-        return "unknown"
-
-    # 1. Lowercase
-    name = model_name.lower().strip()
-
-    # 2. Strip common provider prefixes
-    prefixes = [
-        r'openrouter/anthropic/', r'openrouter/deepseek/', r'openrouter/openai/',
-        r'openrouter/google/', r'openrouter/', r'together_ai/deepseek-ai/',
-        r'together_ai/', r'anthropic/', r'openai/', r'google/', r'gemini/',
-        r'deepseek-ai/', r'deepseek/', r'azure/', r'aws/', r'vertex/'
-    ]
-    for prefix in prefixes:
-        name = re.sub(f'^{prefix}', '', name)
-
-    # 3. Extract and normalize Date (using the helper from previous steps)
-    # Ensure normalize_date_string returns (clean_name, "YYYY_MM_DD")
-    name, date_str = normalize_date_string(name)
-
-    # 4. Handle specific model aliases BEFORE strict cleaning
-    if 'deepseek-chat' in name and 'v3' not in name:
-        name = name.replace('deepseek-chat', 'deepseek-v3')
-
-    # 5. Apply Strict Snake Case
-    name = to_strict_snake_case(name)
-
-    # 6. Reattach Date (which is already in YYYY_MM_DD format)
-    if date_str:
-        name = f"{name}_{date_str}"
-
-    return name
-
-def normalize_date_string(text: str) -> Tuple[str, str]:
-    """
-    Extracts a date from a string and converts it to YYYY_MM_DD format.
-    Returns: (text_without_date, formatted_date_string)
-    """
-    # Patterns for YYYYMMDD, YYYY-MM-DD, YYYY/MM/DD (years 2020-2029)
-    # We look for word boundaries or underscores around the date
-    date_patterns = [
-        r'(202[0-9])[-_]?([0-1][0-9])[-_]?([0-3][0-9])', # Matches 20250219, 2025-02-19, 2025_02_19
-    ]
-    
-    found_date = ""
-    clean_text = text
-    
-    for pattern in date_patterns:
-        match = re.search(pattern, clean_text)
-        if match:
-            # Extract Y, M, D
-            y, m, d = match.groups()
-            # Create standard format
-            found_date = f"{y}_{m}_{d}"
-            # Remove the original date from the text (replace with placeholder to avoid merging issues)
-            # We strip it out completely to clean the base name, then append it back later
-            clean_text = re.sub(pattern, '', clean_text)
-            break
-            
-    return clean_text, found_date
-def to_strict_snake_case(text: str) -> str:
-    """
-    Converts text to strict snake_case:
-    1. Lowercase
-    2. Replaces ALL non-alphanumeric chars (hyphens, dots, spaces) with '_'
-    3. Collapses multiple '__' into single '_'
-    4. Strips leading/trailing '_'
-    """
-    if not isinstance(text, str):
-        return "unknown"
-    
-    # Lowercase
-    text = text.lower()
-    
-    # Replace anything that is NOT a letter or number with _
-    text = re.sub(r'[^a-z0-9]', '_', text)
-    
-    # Collapse multiple underscores to single
-    text = re.sub(r'_+', '_', text)
-    
-    return text.strip('_')
-
-def get_clean_scaffold_and_model(raw_index_str: str) -> Tuple[str, str]:
-    """
-    Parses a raw index string into (Scaffold, Model) with strict snake_case.
-    Input: "AssistantBench-Agent__claude-3-7-sonnet"
-    Output: ("assistantbench_agent", "claude_3_7_sonnet")
-    """
-    # Lowercase immediately
-    raw_lower = raw_index_str.lower().strip()
-    
-    # --- Step 1: Split Scaffold and Model ---
-    # We still need to split by '__' if it exists in the raw data to separate Agent from Model
-    if '__' in raw_lower:
-        parts = raw_lower.split('__')
-        raw_scaffold = parts[0]
-        raw_model = parts[-1]
-    else:
-        raw_scaffold = raw_lower
-        raw_model = "unknown"
-
-    # --- Step 2: Clean the Scaffold Name ---
-    # Normalize to known scaffolds, then apply strict snake_case
-    
-    if 'hal' in raw_scaffold and 'general' in raw_scaffold:
-        clean_scaffold = "hal_generalist"
-    elif 'browser' in raw_scaffold and 'use' in raw_scaffold:
-        clean_scaffold = "browser_use"
-    elif 'core' in raw_scaffold:
-        clean_scaffold = "core_agent"
-    elif 'scicode' in raw_scaffold:
-        clean_scaffold = "scicode_agent"
-    elif 'assistant' in raw_scaffold:
-        clean_scaffold = "assistantbench_agent"
-    elif 'taubench' in raw_scaffold:
-        if 'few' in raw_scaffold:
-            clean_scaffold = "taubench_fewshot"
-        elif 'tool' in raw_scaffold:
-            clean_scaffold = "taubench_toolcalling"
-        else:
-            clean_scaffold = "taubench"
-    else:
-        # Remove parens and clean
-        clean_scaffold = re.sub(r'\s*\(.*?\)', '', raw_scaffold)
-        clean_scaffold = to_strict_snake_case(clean_scaffold)
-
-    # --- Step 3: Normalize the Model Name ---
-    clean_model = normalize_model_name(raw_model)
-
-    return clean_scaffold, clean_model
 
 
 def extract_trace_info_efficient(file_path: Path) -> Dict:
@@ -269,19 +138,26 @@ def compile_response_matrix(traces_dir: Path, benchmark_filter: str = None) -> p
         config = info['config']
         results = info['results']
         
-        # Extract agent and model names
-        agent_name = config.get('agent_name', 'unknown')
-        model_name = config.get('agent_args', {}).get('model_name', 'unknown')
-        benchmark = config.get('benchmark_name', 'unknown')
+        # Extract agent and model names - skip if missing
+        agent_name = config.get('agent_name')
+        model_name = config.get('agent_args', {}).get('model_name')
+        benchmark = config.get('benchmark_name')
         
-        # Create agent key with special handling for HAL Generalist
-        agent_name_lower = agent_name.lower()
-        if any(x in agent_name_lower for x in ['hal generalist agent', 'hal generalist', 'hal_generalist_agent', 'hal_generalist']):
-            # Normalize model name for HAL Generalist to merge across providers
-            normalized_model = normalize_model_name(model_name)
-            agent_key = f"hal_generalist_{normalized_model}"
-        else:
-            agent_key = f"{agent_name}__{model_name}"
+        # Skip entries with missing required fields
+        if not agent_name or not model_name or not benchmark:
+            print(f"  Skipping: missing required fields (agent={agent_name}, model={model_name}, benchmark={benchmark})")
+            continue
+        
+        # Create agent key using consistent normalization
+        raw_key = f"{agent_name}__{model_name}"
+        scaffold, model = get_clean_scaffold_and_model(raw_key)
+        
+        # Skip if normalization failed
+        if not scaffold or not model:
+            print(f"  Skipping: failed to normalize '{raw_key}'")
+            continue
+        
+        agent_key = f"{scaffold}_{model}"
         
         # Process successful tasks
         successful_tasks = results.get('successful_tasks', [])
@@ -353,14 +229,20 @@ def merge_response_matrices(resmat_dir: Path) -> pd.DataFrame:
                 # Create a new index based on normalized Scaffold__Model
                 new_index = []
                 for idx in df.index:
-                    # This will now return ("assistantbench-agent", "claude-3-7-sonnet_2025_02_19")
                     scaffold, model = get_clean_scaffold_and_model(str(idx))
                     
-                    # The final key will look like: assistantbench-agent__claude-3-7-sonnet_2025_02_19
+                    # Skip entries that failed normalization
+                    if not scaffold or not model:
+                        continue
+                    
                     new_idx = f"{scaffold}_{model}"
                     new_index.append(new_idx)
                 
                 df.index = new_index
+                
+                # Filter out any rows with empty string indices
+                df = df[df.index != "_"]
+                df = df[df.index != ""]
                 
                 # Deduplicate WITHIN file immediately
                 # If "opus 4.1" and "opus_4_1" existed in the same file, they are now identical keys
@@ -461,6 +343,8 @@ def main():
         # Show sample
         print("\nSample of merged response matrix:")
         print(df.iloc[:10, :10])
+        print("\nMerged rows")
+        print(df.index.tolist())
         return
     
     # Normal compilation mode - handle multiple benchmarks
